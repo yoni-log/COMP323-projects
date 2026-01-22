@@ -7,6 +7,15 @@ from pathlib import Path
 
 import pygame
 
+@dataclass
+class PowerUp:
+    rect: pygame.Rect
+    power: str
+# shield gives the played immunity frames to red
+# speed makes the player faster
+# greedy gives double coins
+powers: List[str] = ["speed", "shield", "greedy"]
+    
 
 @dataclass
 class Colors:
@@ -17,6 +26,7 @@ class Colors:
     player: tuple[int, int, int] = (136, 192, 208)
     enemy: tuple[int, int, int] = (191, 97, 106)
     coin: tuple[int, int, int] = (235, 203, 139)
+    powerup: tuple[int, int, int] = (20, 255, 80)
 
 
 COLORS = Colors()
@@ -24,12 +34,19 @@ COLORS = Colors()
 
 class Game:
     def __init__(self) -> None:
-        self.fps = 60
+        self.fps = 120
         self.w = 1600
         self.h = 800
         self.screen = pygame.display.set_mode((self.w, self.h))
         self.font = pygame.font.SysFont(None, 24)
         self.big_font = pygame.font.SysFont(None, 48)
+
+        self.last_score = 0
+
+        self.current_powerup: str = None
+        self.speed: float = 360
+        self.shield_durability = 0
+        self.enemy_speed_scale = 1
 
         self.save_path = Path(__file__).resolve().parent.parent / "save.json"
         self.high_score = self._load_high_score()
@@ -63,15 +80,21 @@ class Game:
         self.enemy_vs: list[pygame.Vector2] = []
         for _ in range(3):
             r = pygame.Rect(random.randrange(40, self.w - 40), random.randrange(80, self.h - 40), 36, 36)
-            v = pygame.Vector2(random.choice([-1, 1]) * 220, random.choice([-1, 1]) * 180)
+            v = pygame.Vector2(random.choice([-1, 1]) * 220 * self.enemy_speed_scale, random.choice([-1, 1]) * 180* self.enemy_speed_scale)
             self.enemy_rects.append(r)
             self.enemy_vs.append(v)
 
         self.coin = self._spawn_coin()
+        self.powerup = self._spawn_powerup()
 
     def _spawn_coin(self) -> pygame.Rect:
         # Keep coin away from top HUD area.
         return pygame.Rect(random.randrange(20, self.w - 20), random.randrange(90, self.h - 20), 18, 18)
+
+    def _spawn_powerup(self) -> pygame.Rect:
+        rect = pygame.Rect(random.randrange(20, self.w - 20), random.randrange(90, self.h - 20), 18, 18)
+        power = random.choice(powers)
+        return PowerUp(rect=rect, power=power)
 
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.KEYDOWN:
@@ -103,7 +126,9 @@ class Game:
             input_y += 1.0
 
         # Movement: velocity integrates into position; dt makes it frame-rate independent.
-        speed = 360.0
+        speed = self.speed
+        if self.current_powerup == "speed":
+            speed = self.speed * 1.5
         self.player_v.x = input_x * speed
         self.player_v.y = input_y * speed
 
@@ -119,28 +144,49 @@ class Game:
             r.y += int(v.y * dt)
             if r.left < bounds.left:
                 r.left = bounds.left
-                v.x *= -1
+                v.x = abs(v.x) #  preserve the speed and change direction unlike "v.x *= -1"
             if r.right > bounds.right:
                 r.right = bounds.right
-                v.x *= -1
+                v.x = -abs(v.x)
             if r.top < bounds.top:
                 r.top = bounds.top
-                v.y *= -1
+                v.y = abs(v.y)
             if r.bottom > bounds.bottom:
                 r.bottom = bounds.bottom
-                v.y *= -1
+                v.y = -abs(v.y)
+
+        if self.score > 0 and self.score != self.last_score:
+            self.last_score = self.score
+            self.enemy_speed_scale = min(1 + (self.score / 10), 2.5)
+            for v in self.enemy_vs:
+                if v.length() > 0:
+                    v.scale_to_length(220 * self.enemy_speed_scale)
+
+
+        if self.player.colliderect(self.powerup.rect):
+            self.current_powerup = self.powerup.power
+            self.powerup = self._spawn_powerup()
+            if self.current_powerup == "shield":
+                self.shield_durability = 50 # player can survive 50 frames when colliding with red squares
+            else:
+                self.shield_durability = 0
 
         # Collision: player with coin.
         if self.player.colliderect(self.coin):
             self.score += 1
+            if self.current_powerup == "greedy":
+                self.score += 1
             self.coin = self._spawn_coin()
 
         # Collision: player with enemies.
         if self.player.collidelist(self.enemy_rects) != -1:
-            self.state = "gameover"
-            if self.score > self.high_score:
-                self.high_score = self.score
-                self._save_high_score()
+            if self.current_powerup == "shield":
+                self.shield_durability -= 1
+            if self.shield_durability <=0:
+                self.state = "gameover"
+                if self.score > self.high_score:
+                    self.high_score = self.score
+                    self._save_high_score()
 
     def draw(self) -> None:
         self.screen.fill(COLORS.bg)
@@ -153,10 +199,14 @@ class Game:
             self._draw_gameover()
 
     def _draw_hud(self) -> None:
-        panel = pygame.Rect(12, 12, 420, 40)
+        panel = pygame.Rect(12, 12, 520, 40)
         pygame.draw.rect(self.screen, COLORS.panel, panel, border_radius=10)
-
-        text = f"Score: {self.score}    High: {self.high_score}"
+        poweruptxt = f""
+        if self.current_powerup:
+            poweruptxt = f"    Powerup: {self.current_powerup}"
+            if self.current_powerup == "shield":
+                poweruptxt += f"    Shield Durability: {self.shield_durability}"
+        text = f"Score: {self.score}    High: {self.high_score}" + poweruptxt
         surf = self.font.render(text, True, COLORS.text)
         self.screen.blit(surf, (panel.x + 12, panel.y + 12))
 
@@ -164,6 +214,7 @@ class Game:
         self._draw_hud()
 
         pygame.draw.rect(self.screen, COLORS.coin, self.coin, border_radius=7)
+        pygame.draw.rect(self.screen, COLORS.powerup, self.powerup.rect, border_radius=5)
         for r in self.enemy_rects:
             pygame.draw.rect(self.screen, COLORS.enemy, r, border_radius=8)
         pygame.draw.rect(self.screen, COLORS.player, self.player, border_radius=8)
